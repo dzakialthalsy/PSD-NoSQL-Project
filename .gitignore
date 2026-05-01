@@ -1,0 +1,12 @@
+# Data files (terlalu besar untuk Git)
+data/*.csv
+data/*.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Docker volumes
+.docker/

@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+
+  # ─────────────────────────────────────
+  # 1. MongoDB — Database utama
+  # ─────────────────────────────────────
+  mongo:
+    image: mongo:7.0
+    container_name: movies_mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: movies_db
+    volumes:
+      - mongo_data:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - movies_net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ─────────────────────────────────────
+  # 2. Mongo Express — Web UI
+  # ─────────────────────────────────────
+  mongo-express:
+    image: mongo-express:1.0.2
+    container_name: movies_mongo_express
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongo
+      ME_CONFIG_MONGODB_PORT: 27017
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin123
+      ME_CONFIG_MONGODB_ENABLE_ADMIN: "true"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - movies_net
+
+  # ─────────────────────────────────────
+  # 3. ETL — Proses data CSV → MongoDB
+  # ─────────────────────────────────────
+  etl:
+    build:
+      context: ./etl
+      dockerfile: Dockerfile
+    container_name: movies_etl
+    environment:
+      MONGO_URI: mongodb://mongo:27017/
+    volumes:
+      - ./data:/data
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - movies_net
+    restart: "no"   # Hanya jalan sekali
+
+# ─────────────────────────────────────
+# Volume & Network
+# ─────────────────────────────────────
+volumes:
+  mongo_data:
+    driver: local
+
+networks:
+  movies_net:
+    driver: bridge
