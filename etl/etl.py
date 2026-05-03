@@ -189,8 +189,7 @@ def process_ratings(ratings, links_clean):
         return dist
 
     dist_series = ratings.groupby('movieId')['rating'].apply(build_distribution)
-    dist_df     = dist_series.reset_index()
-    dist_df.columns = ['movieId', 'distribution']
+    dist_df     = dist_series.reset_index(name='distribution')
     agg = agg.merge(dist_df, on='movieId', how='left')
 
     # Map ke tmdbId
