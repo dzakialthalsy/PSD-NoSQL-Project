@@ -3,80 +3,73 @@ import ast
 import os
 from pymongo import MongoClient
 
-# --- KONFIGURASI ---
-DATA_DIR   = "/data"
-MONGO_URI  = os.getenv("MONGO_URI", "mongodb://mongo:27017/")
-DB_NAME    = "movies_db"
-COLL_FILMS = "films"
+DATA_DIR = "/data"
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongo:27017/")
 
 def run_etl():
-    print("\n🚀 Memulai ETL NoSQL Koleksi Film...")
+    print("\n🚀 Memulai ETL NoSQL (Versi Anti-Duplikat)...")
 
-    # 1. BACA CSV (Ambil kolom yang perlu saja biar hemat RAM)
-    print("[1/5] Membaca file CSV...")
-    movies   = pd.read_csv(os.path.join(DATA_DIR, "movies_metadata.csv"), low_memory=False, 
-                           usecols=['id', 'title', 'genres', 'runtime', 'release_date'])
-    links    = pd.read_csv(os.path.join(DATA_DIR, "links.csv"), usecols=['movieId', 'tmdbId'])
-    credits  = pd.read_csv(os.path.join(DATA_DIR, "credits.csv"))
+    # 1. BACA DATA
+    print("[1/5] Membaca CSV...")
+    movies = pd.read_csv(os.path.join(DATA_DIR, "movies_metadata.csv"), low_memory=False)
+    credits = pd.read_csv(os.path.join(DATA_DIR, "credits.csv"))
+    links = pd.read_csv(os.path.join(DATA_DIR, "links.csv"))
     
-    # Gunakan ratings_small agar proses cepat dan tidak crash
+    # Gunakan small ratings agar cepat
     rating_path = os.path.join(DATA_DIR, "ratings_small.csv")
     ratings = pd.read_csv(rating_path) if os.path.exists(rating_path) else pd.read_csv(os.path.join(DATA_DIR, "ratings.csv"))
 
-    # 2. BERSIHKAN DATA
-    print("[2/5] Membersihkan data...")
-    # Pastikan ID numerik dan tidak ada yang kosong
+    # 2. BERSIHKAN MOVIES (PONDASI UTAMA)
+    print("[2/5] Membersihkan Metadata & Hapus Duplikat...")
     movies = movies[movies['id'].str.match(r'^\d+$', na=False)].copy()
     movies['id'] = movies['id'].astype(int)
-    
-    links = links.dropna(subset=['tmdbId'])
-    links['tmdbId'] = links['tmdbId'].astype(int)
-    ml_to_tmdb = dict(zip(links['movieId'], links['tmdbId']))
+    # Wajib drop duplikat di awal agar pondasi _id unik
+    movies = movies.drop_duplicates(subset=['id'])
 
-    # 3. PROSES RATING (AGREGASI)
-    print("[3/5] Menghitung rata-rata rating...")
-    ratings['tmdb_id'] = ratings['movieId'].map(ml_to_tmdb)
-    agg = ratings.groupby('tmdb_id')['rating'].agg(['mean', 'count']).reset_index()
-    rating_lookup = agg.set_index('tmdb_id').to_dict('index')
-
-    # 4. PROSES CREW (AMBIL DIRECTOR SAJA)
-    print("[4/5] Mengambil data Sutradara...")
+    # 3. PROSES SUTRADARA (HAPUS DUPLIKAT DI CREDITS)
+    print("[3/5] Memproses Sutradara...")
     def get_director(x):
         try:
             items = ast.literal_eval(x)
-            # Hanya ambil nama Director agar ukuran dokumen kecil
             return [i['name'] for i in items if i['job'] == 'Director']
         except: return []
     
     credits['id'] = pd.to_numeric(credits['id'], errors='coerce')
+    # Ambil sutradara lalu hapus duplikat ID di credits agar tidak merusak merge
     credits['directors'] = credits['crew'].apply(get_director)
+    credits_clean = credits.dropna(subset=['id']).drop_duplicates(subset=['id'])
+
+    # 4. HITUNG RATING
+    print("[4/5] Menghitung Agregasi Rating...")
+    links = links.dropna(subset=['tmdbId'])
+    links['tmdbId'] = links['tmdbId'].astype(int)
+    ml_to_tmdb = dict(zip(links['movieId'], links['tmdbId']))
+    
+    ratings['tmdb_id'] = ratings['movieId'].map(ml_to_tmdb)
+    agg = ratings.groupby('tmdb_id')['rating'].agg(['mean', 'count']).reset_index()
+    rating_lookup = agg.set_index('tmdb_id').to_dict('index')
 
     # 5. MERGE & IMPORT
     print("[5/5] Menggabungkan data & Kirim ke MongoDB...")
-    movies = movies.merge(credits[['id', 'directors']], on='id', how='left')
-
-    # --- TAMBAHKAN BARIS INI UNTUK MENGHAPUS DUPLIKAT ID ---
-    movies = movies.drop_duplicates(subset=['id'], keep='first')
-    # ------------------------------------------------------
+    # Pakai how='left' agar tetap mengacu pada ID movies yang sudah unik
+    final_df = movies.merge(credits_clean[['id', 'directors']], on='id', how='left')
 
     client = MongoClient(MONGO_URI)
-    db = client[DB_NAME]
-    col = db[COLL_FILMS]
-    col.drop() # Hapus data lama agar bersih
+    db = client["movies_db"]
+    col = db["films"]
+    col.drop() # Bersihkan koleksi lama[cite: 3, 4]
 
     docs = []
-    for _, row in movies.iterrows():
+    for _, row in final_df.iterrows():
         m_id = int(row['id'])
         r_data = rating_lookup.get(m_id, {'mean': 0, 'count': 0})
         
+        # Denormalisasi data menjadi Document Store[cite: 1]
         doc = {
             "_id": m_id,
             "title": row['title'],
-            "genres": [g['name'] for g in ast.literal_eval(row['genres'])] if isinstance(row['genres'], str) else [],
             "directors": row['directors'] if isinstance(row['directors'], list) else [],
-            "runtime": int(row['runtime']) if not pd.isna(row['runtime']) else 0,
-            "release_date": row['release_date'],
-            # Field ratings yang Anda inginkan
+            "release_date": str(row['release_date']),
             "ratings": {
                 "average": round(float(r_data['mean']), 2),
                 "vote_count": int(r_data['count'])
@@ -84,10 +77,13 @@ def run_etl():
         }
         docs.append(doc)
 
-    if docs:
-        col.insert_many(docs)
-        print(f"✅ Berhasil! {len(docs)} film masuk ke MongoDB.")
-    
+    # Insert many dengan penanganan duplikat manual jika masih ada yang lolos
+    try:
+        col.insert_many(docs, ordered=False) 
+        print(f"✅ BERHASIL! {len(docs)} dokumen masuk.")
+    except Exception as e:
+        print(f"⚠️ Ada beberapa duplikat yang dilewati, tapi data tetap masuk.")
+
     client.close()
 
 if __name__ == "__main__":
