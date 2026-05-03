@@ -40,6 +40,9 @@ services:
       ME_CONFIG_BASICAUTH_USERNAME: admin
       ME_CONFIG_BASICAUTH_PASSWORD: admin123
       ME_CONFIG_MONGODB_ENABLE_ADMIN: "true"
+      # Fix: dokumen user_ratings bisa sangat besar (ribuan ratings)
+      ME_CONFIG_REQUEST_SIZE: "50mb"
+      ME_CONFIG_SITE_SESSIONSECRET: "moviesnosqlsecret"
     depends_on:
       mongo:
         condition: service_healthy
